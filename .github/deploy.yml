@@ -1,0 +1,90 @@
+# この自動化処理（ワークフロー）全体に付ける名前です
+name: Direct Deploy to Amazon EC2
+
+# この処理を「いつ実行するか（トリガー）」を決める設定です
+on:
+  # コードが GitHub に「push（プッシュ）」されたときを指定しています
+  push:
+    # 対象となるブランチを「devops-setting」ブランチに限定しています
+    branches: [ "devops-setting" ]
+
+# 具体的に実行する作業（ジョブ）の塊をここに定義します
+jobs:
+  # 「deploy」という名前のジョブを定義しています（名前は任意でOK）
+  deploy:
+    # この作業を実行するクラウド上の仮想パソコンのOSとして「最新のUbuntu」を指定しています
+    runs-on: ubuntu-latest
+    
+    # 仮想パソコン（Ubuntu）上で順番に実行する具体的なステップ（手順）です
+    steps:
+    
+    # --- 【ステップ1: コードの取得】 ---
+    # このステップに分かりやすい見出し（名前）を付けています
+    - name: Checkout code
+      # GitHub公式が提供している「リポジトリのコードをUbuntu内にダウンロードする」共通パーツを使います
+      uses: actions/checkout@v4
+
+    # --- 【ステップ2: Java環境の構築】 ---
+    # このステップの見出しです
+    - name: Set up JDK 21
+      # 「Javaの環境をセットアップする」ための公式共通パーツを使います
+      uses: actions/setup-java@v4
+      # 共通パーツに渡すパラメータ（設定値）を指定します
+      with:
+        # インストールするJavaのバージョンを「21」に指定しています
+        java-version: '21'
+        # Javaのディストリビューション（提供元）として「Temurin (Eclipse)」を指定しています
+        distribution: 'temurin'
+        # 2回目以降のビルドを高速化するため、Mavenのライブラリキャッシュ機能を有効にしています
+        cache: maven
+
+    # --- 【ステップ3: JARファイルのビルド】 ---
+    # このステップの見出しです
+    - name: Build with Maven
+      # 共通パーツではなく、Ubuntuのターミナル上で直接シェルコマンドを実行します
+      # 「./mvnw」を使って、テスト（JUnit等）をスキップしながらクリーンビルドを行い、JARファイルを生成します
+      run: ./mvnw clean package -DskipTests=true
+
+    # --- 【ステップ4: EC2へのファイル転送】 ---
+    # このステップの見出しです
+    - name: Copy JAR and Script to EC2
+      # appleboy氏が開発した「SSH経由で安全にファイルを転送（scp）する」外部パーツを使います
+      uses: appleboy/scp-action@v0.1.7
+      # 転送に必要な接続情報を指定します
+      with:
+        # 接続先のIPアドレスです（GitHubのSecretsに隠した「EC2_HOST」から読み込みます）
+        host: ${{ secrets.EC2_HOST }}
+        # ログインするユーザー名です（Amazon Linuxのデフォルトである「ec2-user」を指定）
+        username: ec2-user
+        # 認証に必要なSSH秘密鍵です（Secretsに隠した「.pem」の中身を読み込みます）
+        key: ${{ secrets.EC2_SSH_KEY }}
+        # SSH接続に使用するポート番号（標準の22番）を指定しています
+        port: 22
+        # Ubuntu内からEC2へ「送信したいファイル」をカンマ区切りで指定しています（JARと起動スクリプト）
+        source: "target/*.jar,scripts/deploy.sh"
+        # EC2側のどこにファイルを置くか、保存先のフォルダを指定しています
+        target: "/home/ec2-user/app"
+        # 「0」にすることで、送信元（targetやscripts）のフォルダ階層をそのまま崩さずにEC2へ送ります
+        strip_components: 0
+
+    # --- 【ステップ5: EC2での起動コマンド実行】 ---
+    # このステップの見出しです
+    - name: Execute Remote SSH Commands
+      # appleboy氏が開発した「EC2にSSHで入り、直接コマンドを遠隔実行する」外部パーツを使います
+      uses: appleboy/ssh-action@v1.0.3
+      # 遠隔操作に必要な接続情報を指定します（上で使ったものと同じです）
+      with:
+        # 接続先のIPアドレス（Secretsから読み込み）
+        host: ${{ secrets.EC2_HOST }}
+        # ログインユーザー名（ec2-user）
+        username: ec2-user
+        # 認証用のSSH秘密鍵（Secretsから読み込み）
+        key: ${{ secrets.EC2_SSH_KEY }}
+        # SSHポート番号（22番）
+        port: 22
+        # EC2の中で実際に実行させるコマンドを縦に並べて書いています（「|」は複数行書くよ、の合図です）
+        script: |
+          # 送られてきたデプロイスクリプト（deploy.sh）に、実行権限（+x）を与えます
+          chmod +x /home/ec2-user/app/scripts/deploy.sh
+          # デプロイスクリプトを実行し、古いアプリの停止と新しいアプリのバックグラウンド起動を行います
+          /home/ec2-user/app/scripts/deploy.sh
